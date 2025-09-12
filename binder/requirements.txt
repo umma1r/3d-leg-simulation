@@ -1,0 +1,6 @@
+vtk==9.4.2
+trame==3.*
+trame-vtk==2.*
+trame-vuetify==2.*
+jupyterlab
+jupyter-server-proxy
