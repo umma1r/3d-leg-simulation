@@ -6,4 +6,4 @@ if not exist .venv (
 call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip >nul
 pip install "PyQt5==5.15.*" "vtk>=9.2,<10"
-python leg_sim.py
+python 3dlegsim.py
