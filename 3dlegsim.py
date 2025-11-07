@@ -15,12 +15,19 @@ class LegSimulation(QMainWindow):
 
         # ── Sliders ──────────────────────────────────────────────
         self.massSlider   = self.create_slider(0, 20, 1, 10)
-        # Exercise-weight slider now limited to 0 – 10 kg
-        self.massW        = self.create_slider(0, 10, 1, 5)
+
+        # Exercise weight: 0–500 g in 50 g steps, then 1000/1500/2000/2500 g
+        grams_list = list(range(0, 501, 50)) + [1000, 1500, 2000, 2500]
+        self.massW_values_kg = [g / 1000.0 for g in grams_list]
+        # integer index slider 0..len(values)-1 (default to 0 g)
+        self.massW = self.create_slider(0, len(self.massW_values_kg) - 1, 1, 0)
+
+        # UI "Leg angle" (0..45). Flexion used in physics = 90 − this.
         self.angle_slider = self.create_slider(0, 45, 1, 30)
         self.shin_length  = self.create_slider(0.1, 1.0, 0.01, 0.5)
-        # angle_t slider now limited to 30 – 60 °
-        self.angle_t      = self.create_slider(30, 60, 1, 30)
+
+        # Angle_t is patellar alpha, constrained to 11.5..20°
+        self.angle_t      = self.create_slider(11.5, 20.0, 0.1, 13.0)
 
         # ── Labels ───────────────────────────────────────────────
         self.Fg_label      = QLabel()
@@ -56,12 +63,13 @@ class LegSimulation(QMainWindow):
         main_widget.setLayout(layout)
         self.setCentralWidget(main_widget)
 
-        # Connect sliders
+        # ── Connectors (two‑way binding between flexion and alpha) ─────────
         self.massSlider.valueChanged.connect(self.update_simulation)
         self.massW.valueChanged.connect(self.update_simulation)
-        self.angle_slider.valueChanged.connect(self.update_simulation)
         self.shin_length.valueChanged.connect(self.update_simulation)
-        self.angle_t.valueChanged.connect(self.update_simulation)
+
+        self.angle_slider.valueChanged.connect(self.on_leg_angle_changed)
+        self.angle_t.valueChanged.connect(self.on_alpha_changed)
 
         self.setWindowTitle("Leg Force Simulation")
         self.resize(1200, 600)
@@ -76,11 +84,20 @@ class LegSimulation(QMainWindow):
 
         self.setup_camera()
         self.create_force_arrows()
-        self.update_simulation()
 
-    
-    # GUI construction
-    # ─────────────────────────────────────────────────────────────
+        # Guard to avoid feedback loops
+        self._syncing = False
+
+        # Initialize alpha from current leg angle
+        self.on_leg_angle_changed()
+
+    # ── Helpers for float-backed sliders ────────────────────────
+    def set_slider_value(self, slider, val_float):
+        scale = slider.property("float_scale")
+        slider.blockSignals(True)
+        slider.setValue(int(round(val_float * scale)))
+        slider.blockSignals(False)
+
     def create_slider(self, min_val, max_val, step, init_val):
         s = QSlider(Qt.Horizontal)
         if isinstance(min_val, float) or isinstance(max_val, float):
@@ -100,6 +117,12 @@ class LegSimulation(QMainWindow):
     def get_slider_value(self, slider):
         return slider.value() / slider.property("float_scale")
 
+    def get_exercise_weight_kg(self):
+        """Map the exercise-weight index slider to its kg value."""
+        idx = int(self.massW.value())
+        idx = max(0, min(idx, len(self.massW_values_kg) - 1))
+        return self.massW_values_kg[idx]
+
     def create_vtk_widget(self):
         from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
         widget = QVTKRenderWindowInteractor(self)
@@ -110,9 +133,82 @@ class LegSimulation(QMainWindow):
         self.iren.Initialize()
         return widget
 
-    
-    # Rotational movement
-    # ─────────────────────────────────────────────────────────────
+    # ── Alpha model: monotonic piecewise-linear ─────────────────
+    # Anchors: (flexion°, alpha°) — 45→11.5, 65→13.5, 75→14.0, 90→20.0
+    ALPHA_POINTS = [
+        (45.0, 11.5),
+        (65.0, 13.5),
+        (75.0, 14.0),
+        (90.0, 20.0),
+    ]
+
+    def alpha_from_flexion(self, flex_deg: float) -> float:
+        """Forward map: knee flexion (deg) → alpha (deg)."""
+        pts = self.ALPHA_POINTS
+        if flex_deg <= pts[0][0]:
+            (x0, y0), (x1, y1) = pts[0], pts[1]
+            return y0 + (y1 - y0) * (flex_deg - x0) / (x1 - x0)
+        if flex_deg >= pts[-1][0]:
+            (x0, y0), (x1, y1) = pts[-2], pts[-1]
+            return y0 + (y1 - y0) * (flex_deg - x0) / (x1 - x0)
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            if x0 <= flex_deg <= x1:
+                t = (flex_deg - x0) / (x1 - x0)
+                return y0 + t * (y1 - y0)
+        return 11.5
+
+    def flexion_from_alpha(self, alpha_deg: float) -> float:
+        """Inverse map: alpha (deg) → knee flexion (deg)."""
+        alpha_deg = max(11.5, min(20.0, alpha_deg))
+        pts = self.ALPHA_POINTS
+        if alpha_deg <= pts[0][1]:
+            (x0, y0), (x1, y1) = pts[0], pts[1]
+            return x0 + (x1 - x0) * (alpha_deg - y0) / (y1 - y0)
+        if alpha_deg >= pts[-1][1]:
+            (x0, y0), (x1, y1) = pts[-2], pts[-1]
+            return x0 + (x1 - x0) * (alpha_deg - y0) / (y1 - y0)
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            if y0 <= alpha_deg <= y1 or y1 <= alpha_deg <= y0:
+                t = (alpha_deg - y0) / (y1 - y0)
+                return x0 + t * (x1 - x0)
+        return 65.0
+
+    # ── Binding handlers ─────────────────────────────────────────
+    def on_leg_angle_changed(self):
+        """User moved the leg: compute α and update Angle_t."""
+        if getattr(self, "_syncing", False):
+            return
+        self._syncing = True
+        try:
+            angle_val = self.get_slider_value(self.angle_slider)  # 0..45
+            flex = 90.0 - angle_val                               # 45..90
+            alpha = self.alpha_from_flexion(flex)
+            alpha = max(11.5, min(20.0, alpha))
+            self.set_slider_value(self.angle_t, alpha)
+        finally:
+            self._syncing = False
+        self.update_simulation()
+
+    def on_alpha_changed(self):
+        """User moved Angle_t: compute flexion and update leg slider."""
+        if getattr(self, "_syncing", False):
+            return
+        self._syncing = True
+        try:
+            alpha = self.get_slider_value(self.angle_t)           # 11.5..20
+            flex = self.flexion_from_alpha(alpha)                 # 45..90
+            new_angle_val = 90.0 - flex                           # 0..45
+            new_angle_val = max(0.0, min(45.0, new_angle_val))
+            self.set_slider_value(self.angle_slider, new_angle_val)
+        finally:
+            self._syncing = False
+        self.update_simulation()
+
+    # Rotational movement (unchanged)
     def load_thigh_model(self, filename):
         r = vtk.vtkSTLReader()
         r.SetFileName(filename)
@@ -173,9 +269,7 @@ class LegSimulation(QMainWindow):
         b = self.shin_polydata.GetBounds()
         self.shin_actor.SetOrigin(b[1], 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5]))
 
-    
-    # Scene setup
-    # ─────────────────────────────────────────────────────────────
+    # Scene setup (unchanged)
     def setup_camera(self):
         cam = self.ren.GetActiveCamera()
         cam.SetPosition(0, -1.5, 0)
@@ -184,9 +278,7 @@ class LegSimulation(QMainWindow):
         cam.SetParallelProjection(True)
         self.ren.ResetCamera()
 
-    
-    # Force Arrows
-    # ─────────────────────────────────────────────────────────────
+    # Force Arrows (unchanged)
     def shift_arrow_to_x_minus1(self, arrow_source):
         arrow_source.Update()
         arrow_poly = arrow_source.GetOutput()
@@ -223,22 +315,20 @@ class LegSimulation(QMainWindow):
         self.arrow_actor_ankle.SetOrigin(-1, 0, 0)
         self.ren.AddActor(self.arrow_actor_ankle)
 
-    
-    # Physics formulas
-    # ─────────────────────────────────────────────────────────────
+    # Physics formulas (unchanged, now reading exercise weight via the list)
     def update_simulation(self):
-        mass      = self.get_slider_value(self.massSlider)
-        massW     = self.get_slider_value(self.massW)
-        angle_val = self.get_slider_value(self.angle_slider)
-        shin_len  = self.get_slider_value(self.shin_length)
-        angle_t   = self.get_slider_value(self.angle_t)
+        mass       = self.get_slider_value(self.massSlider)       # kg
+        massW_kg   = self.get_exercise_weight_kg()                # kg (from discrete list)
+        angle_val  = self.get_slider_value(self.angle_slider)     # 0..45
+        shin_len   = self.get_slider_value(self.shin_length)      # m
+        angle_t    = self.get_slider_value(self.angle_t)          # 11.5..20 deg
 
-        Fg    = mass  * 9.81
-        Fe    = massW * 9.81
-        angle = 90.0 - angle_val
+        Fg    = mass    * 9.81
+        Fe    = massW_kg * 9.81
+        angle = 90.0 - angle_val  # knee flexion (deg)
 
         self.Fg_label.setText(f"{Fg:.2f} N (from {mass:.2f} kg)")
-        self.Fe_label.setText(f"{Fe:.2f} N (from {massW:.2f} kg)")
+        self.Fe_label.setText(f"{Fe:.2f} N (from {massW_kg:.2f} kg)")
         self.angle_label.setText(f"{angle:.2f} deg")
         self.length_label.setText(f"{shin_len:.2f} m")
         self.angle_t_label.setText(f"{angle_t:.2f} deg")
@@ -259,7 +349,7 @@ class LegSimulation(QMainWindow):
         self.Ft_label.setText(f"{Ft:.2f} N")
         self.t_net_label.setText(f"{t_net:.2f} N m")
 
-        # Rotate shin 
+        # Rotate shin
         if self.shin_actor:
             self.shin_actor.SetOrientation(0, -angle_val, 0)
 
@@ -286,17 +376,12 @@ class LegSimulation(QMainWindow):
         self.vtk_widget.GetRenderWindow().Render()
 
 
-
 # QApplication define
-# ───────────────────────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
-
-    # Global font size
     font = QFont()
     font.setPointSize(14)
     app.setFont(font)
-
     w = LegSimulation()
     w.show()
     sys.exit(app.exec_())
