@@ -1,41 +1,37 @@
-```bash
 #!/bin/bash
-# macOS auto-launch script for 3D Leg Simulation
-# Double-clickable in Finder
+# macOS double-click launcher for 3D Leg Simulation
+set -euo pipefail
 
 echo "=== 3D Leg Simulation Setup and Launch (macOS) ==="
-echo ""
 
-# Check for Python 3
-if ! command -v python3 &>/dev/null; then
-  echo "Python 3 not found. Installing via Homebrew..."
-  if ! command -v brew &>/dev/null; then
-    echo "Homebrew not found. Installing Homebrew first..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  fi
-  brew install python@3.11
+# Find repo dir (the folder containing this script) and cd there
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Prefer an existing python3; if missing, offer to install
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  osascript -e 'display dialog "Python 3 is required. Click OK to open python.org. Install Python 3, then double-click this file again." buttons {"OK"} default button "OK"'
+  open "https://www.python.org/downloads/"
+  exit 0
 fi
 
-PYTHON=$(command -v python3)
-echo "Using Python: $PYTHON"
-
-# Create virtual environment if missing
+# Create venv if missing
 if [ ! -d ".venv" ]; then
-  echo "Creating virtual environment..."
-  "$PYTHON" -m venv .venv
+  echo "Creating virtual environment…"
+  "$PY" -m venv .venv
 fi
 
-# Activate venv
-source .venv/bin/activate
+# Activate venv (bash-compatible)
+# shellcheck disable=SC1091
+source ".venv/bin/activate"
 
-# Upgrade pip and install requirements
-echo "Installing dependencies..."
+echo "Upgrading pip and installing dependencies…"
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-# Run the desktop simulation
-echo "Starting Leg Simulation..."
+echo "Launching desktop simulation…"
 python 3dlegsim.py
 
-echo ""
-echo "Simulation closed. You may quit Terminal."
+echo "Simulation closed. You can close this window."
