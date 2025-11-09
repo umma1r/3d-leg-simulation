@@ -2,7 +2,7 @@ import sys
 import math
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout,
-    QFormLayout, QSlider, QLabel
+    QFormLayout, QSlider, QLabel, QStyleFactory
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -19,7 +19,6 @@ class LegSimulation(QMainWindow):
         # Exercise weight: 0–500 g in 50 g steps, then 1000/1500/2000/2500 g
         grams_list = list(range(0, 501, 50)) + [1000, 1500, 2000, 2500]
         self.massW_values_kg = [g / 1000.0 for g in grams_list]
-        # integer index slider 0..len(values)-1 (default to 0 g)
         self.massW = self.create_slider(0, len(self.massW_values_kg) - 1, 1, 0)
 
         # UI "Leg angle" (0..45). Flexion used in physics = 90 − this.
@@ -40,6 +39,41 @@ class LegSimulation(QMainWindow):
 
         # ── VTK Widget ───────────────────────────────────────────
         self.vtk_widget = self.create_vtk_widget()
+
+        # macOS-only slider styling to prevent disappearing handles
+        if sys.platform == "darwin":
+            mac_slider_css = """
+            QSlider::groove:horizontal {
+                height: 8px; background: #d0d0d0; border-radius: 4px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #2d7dff; border-radius: 4px;
+            }
+            QSlider::add-page:horizontal {
+                background: #d0d0d0; border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #404040; border: 1px solid #404040;
+                width: 18px; height: 18px; margin: -6px 0; border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #1e90ff; border-color: #1e90ff;
+            }
+            QSlider::handle:horizontal:pressed {
+                background: #1565c0; border-color: #1565c0;
+            }
+            QSlider::groove:horizontal:disabled,
+            QSlider::add-page:horizontal:disabled,
+            QSlider::sub-page:horizontal:disabled {
+                background: #c0c0c0;
+            }
+            QSlider::handle:horizontal:disabled {
+                background: #a0a0a0; border-color: #808080;
+            }
+            """
+            for s in (self.massSlider, self.massW, self.angle_slider,
+                      self.shin_length, self.angle_t):
+                s.setStyleSheet(mac_slider_css)
 
         # Layout for sliders & labels
         form = QFormLayout()
@@ -63,7 +97,7 @@ class LegSimulation(QMainWindow):
         main_widget.setLayout(layout)
         self.setCentralWidget(main_widget)
 
-        # ── Connectors (two‑way binding between flexion and alpha) ─────────
+        # ── Connectors (two-way binding between flexion and alpha) ─────────
         self.massSlider.valueChanged.connect(self.update_simulation)
         self.massW.valueChanged.connect(self.update_simulation)
         self.shin_length.valueChanged.connect(self.update_simulation)
@@ -97,6 +131,11 @@ class LegSimulation(QMainWindow):
         slider.blockSignals(True)
         slider.setValue(int(round(val_float * scale)))
         slider.blockSignals(False)
+        # macOS paint quirk fix: force a restyle/repaint so handle stays visible
+        if sys.platform == "darwin":
+            slider.style().unpolish(slider)
+            slider.style().polish(slider)
+            slider.update()
 
     def create_slider(self, min_val, max_val, step, init_val):
         s = QSlider(Qt.Horizontal)
@@ -118,7 +157,6 @@ class LegSimulation(QMainWindow):
         return slider.value() / slider.property("float_scale")
 
     def get_exercise_weight_kg(self):
-        """Map the exercise-weight index slider to its kg value."""
         idx = int(self.massW.value())
         idx = max(0, min(idx, len(self.massW_values_kg) - 1))
         return self.massW_values_kg[idx]
@@ -129,7 +167,8 @@ class LegSimulation(QMainWindow):
         self.ren = vtk.vtkRenderer()
         widget.GetRenderWindow().AddRenderer(self.ren)
         self.iren = widget.GetRenderWindow().GetInteractor()
-        self.iren.SetInteractorStyle(vtk.vtkInteractorStyle())  # disable default mouse manipulations
+        # Enable normal rotate/pan/zoom interactions (also activates wheel zoom)
+        self.iren.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
         self.iren.Initialize()
         return widget
 
@@ -143,7 +182,6 @@ class LegSimulation(QMainWindow):
     ]
 
     def alpha_from_flexion(self, flex_deg: float) -> float:
-        """Forward map: knee flexion (deg) → alpha (deg)."""
         pts = self.ALPHA_POINTS
         if flex_deg <= pts[0][0]:
             (x0, y0), (x1, y1) = pts[0], pts[1]
@@ -160,7 +198,6 @@ class LegSimulation(QMainWindow):
         return 11.5
 
     def flexion_from_alpha(self, alpha_deg: float) -> float:
-        """Inverse map: alpha (deg) → knee flexion (deg)."""
         alpha_deg = max(11.5, min(20.0, alpha_deg))
         pts = self.ALPHA_POINTS
         if alpha_deg <= pts[0][1]:
@@ -179,7 +216,6 @@ class LegSimulation(QMainWindow):
 
     # ── Binding handlers ─────────────────────────────────────────
     def on_leg_angle_changed(self):
-        """User moved the leg: compute α and update Angle_t."""
         if getattr(self, "_syncing", False):
             return
         self._syncing = True
@@ -194,7 +230,6 @@ class LegSimulation(QMainWindow):
         self.update_simulation()
 
     def on_alpha_changed(self):
-        """User moved Angle_t: compute flexion and update leg slider."""
         if getattr(self, "_syncing", False):
             return
         self._syncing = True
@@ -208,7 +243,7 @@ class LegSimulation(QMainWindow):
             self._syncing = False
         self.update_simulation()
 
-    # Rotational movement (unchanged)
+    # Rotational movement
     def load_thigh_model(self, filename):
         r = vtk.vtkSTLReader()
         r.SetFileName(filename)
@@ -269,7 +304,7 @@ class LegSimulation(QMainWindow):
         b = self.shin_polydata.GetBounds()
         self.shin_actor.SetOrigin(b[1], 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5]))
 
-    # Scene setup (unchanged)
+    # Scene setup
     def setup_camera(self):
         cam = self.ren.GetActiveCamera()
         cam.SetPosition(0, -1.5, 0)
@@ -278,7 +313,7 @@ class LegSimulation(QMainWindow):
         cam.SetParallelProjection(True)
         self.ren.ResetCamera()
 
-    # Force Arrows (unchanged)
+    # Force Arrows
     def shift_arrow_to_x_minus1(self, arrow_source):
         arrow_source.Update()
         arrow_poly = arrow_source.GetOutput()
@@ -315,13 +350,13 @@ class LegSimulation(QMainWindow):
         self.arrow_actor_ankle.SetOrigin(-1, 0, 0)
         self.ren.AddActor(self.arrow_actor_ankle)
 
-    # Physics formulas (unchanged, now reading exercise weight via the list)
+    # Physics formulas
     def update_simulation(self):
-        mass       = self.get_slider_value(self.massSlider)       # kg
-        massW_kg   = self.get_exercise_weight_kg()                # kg (from discrete list)
-        angle_val  = self.get_slider_value(self.angle_slider)     # 0..45
-        shin_len   = self.get_slider_value(self.shin_length)      # m
-        angle_t    = self.get_slider_value(self.angle_t)          # 11.5..20 deg
+        mass       = self.get_slider_value(self.massSlider)
+        massW_kg   = self.get_exercise_weight_kg()
+        angle_val  = self.get_slider_value(self.angle_slider)
+        shin_len   = self.get_slider_value(self.shin_length)
+        angle_t    = self.get_slider_value(self.angle_t)
 
         Fg    = mass    * 9.81
         Fe    = massW_kg * 9.81
@@ -379,9 +414,16 @@ class LegSimulation(QMainWindow):
 # QApplication define
 def main():
     app = QApplication(sys.argv)
+
+    # macOS: use Fusion style so sliders repaint reliably (Windows unaffected)
+    if sys.platform == "darwin":
+        app.setStyle(QStyleFactory.create("Fusion"))
+
+    # Global font size
     font = QFont()
     font.setPointSize(14)
     app.setFont(font)
+
     w = LegSimulation()
     w.show()
     sys.exit(app.exec_())
